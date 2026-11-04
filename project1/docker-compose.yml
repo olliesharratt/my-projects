@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: asset_monitoring
+      POSTGRES_USER: asset_admin
+      POSTGRES_PASSWORD: asset_password
+    ports: ["5432:5432"]
+    volumes: [asset-monitoring-data:/var/lib/postgresql/data]
+  api:
+    build:
+      context: .
+      dockerfile: src/AssetMonitoring.Api/Dockerfile
+    environment:
+      ConnectionStrings__Database: Host=postgres;Port=5432;Database=asset_monitoring;Username=asset_admin;Password=asset_password
+    ports: ["8080:8080"]
+    depends_on: [postgres]
+volumes:
+  asset-monitoring-data:

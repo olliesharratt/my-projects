@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pathfinding Visualiser</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--grid:#d4d4d4;--wall:#222;--weight:#d9b43c;--seen:#9ec5fe;--path:#ff9800;--start:#198754;--end:#dc3545}
+@media (prefers-color-scheme:dark){:root{--bg:#16181d;--fg:#e8e8e8;--grid:#3a3d45;--wall:#e0e0e0;--weight:#8a6d0b;--seen:#2b4c7e;--path:#ffb74d;--start:#2ea36b;--end:#e5546a}}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif;margin:0;padding:1rem}
+.bar{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.75rem}
+canvas{max-width:100%;border:1px solid var(--grid);touch-action:none}
+button,select{font:inherit;padding:.3rem .6rem}
+#stats{margin-left:auto}
+small{opacity:.75}
+</style>
+</head>
+<body>
+<h1>Pathfinding Visualiser</h1>
+<div class="bar">
+  <label>Algorithm
+    <select id="algo"><option value="bfs">BFS</option><option value="dijkstra">Dijkstra</option><option value="astar" selected>A*</option></select>
+  </label>
+  <label>Paint
+    <select id="paint"><option value="0">Wall</option><option value="5">Weight (cost 5)</option></select>
+  </label>
+  <button id="run">Run</button>
+  <button id="reset">Clear path</button>
+  <button id="clear">Clear all</button>
+  <span id="stats" role="status"></span>
+</div>
+<canvas id="c" aria-label="Pathfinding grid"></canvas>
+<p><small>Drag to paint. Shift+click moves the start, Alt+click moves the goal. BFS ignores weights; Dijkstra and A* respect them; A* uses a Manhattan-distance heuristic.</small></p>
+<script>
+const COLS = 40, ROWS = 22, CELL = 20;
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+cv.width = COLS * CELL; cv.height = ROWS * CELL;
+// cost: 0 = wall, 1 = open, 5 = weighted
+let cost = Array.from({ length: ROWS }, () => Array(COLS).fill(1));
+let start = [5, 11], goal = [34, 11];
+let seen = new Set(), path = [], timer = null;
+const key = (x, y) => y * COLS + x;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n);
+
+class MinHeap {
+  constructor() { this.a = []; }
+  get size() { return this.a.length; }
+  push(item) {
+    const a = this.a; a.push(item);
+    let i = a.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (a[p][0] <= a[i][0]) break;
+      [a[p], a[i]] = [a[i], a[p]]; i = p;
+    }
+  }
+  pop() {
+    const a = this.a, top = a[0], last = a.pop();
+    if (a.length) {
+      a[0] = last;
+      let i = 0;
+      for (;;) {
+        let l = 2 * i + 1, r = l + 1, m = i;
+        if (l < a.length && a[l][0] < a[m][0]) m = l;
+        if (r < a.length && a[r][0] < a[m][0]) m = r;
+        if (m === i) break;
+        [a[m], a[i]] = [a[i], a[m]]; i = m;
+      }
+    }
+    return top;
+  }
+}
+
+function nbrs(x, y) {
+  return [[1, 0], [-1, 0], [0, 1], [0, -1]]
+    .map(([dx, dy]) => [x + dx, y + dy])
+    .filter(([nx, ny]) => nx >= 0 && ny >= 0 && nx < COLS && ny < ROWS && cost[ny][nx] > 0);
+}
+
+function finish(order, prev) {
+  const p = []; let cur = goal, total = 0;
+  while (cur && key(...cur) !== key(...start)) { p.push(cur); total += cost[cur[1]][cur[0]]; cur = prev.get(key(...cur)); }
+  if (!cur) return { order, path: [], total: 0 };
+  p.push(start);
+  return { order, path: p.reverse(), total };
+}
+
+function bfs() {
+  const q = [start], prev = new Map(), vis = new Set([key(...start)]), order = [];
+  for (let i = 0; i < q.length; i++) {
+    const [x, y] = q[i]; order.push([x, y]);
+    if (x === goal[0] && y === goal[1]) return finish(order, prev);
+    for (const [nx, ny] of nbrs(x, y)) {
+      const k = key(nx, ny);
+      if (!vis.has(k)) { vis.add(k); prev.set(k, [x, y]); q.push([nx, ny]); }
+    }
+  }
+  return { order, path: [], total: 0 };
+}
+
+function bestFirst(useHeuristic) {
+  const h = (x, y) => useHeuristic ? Math.abs(x - goal[0]) + Math.abs(y - goal[1]) : 0;
+  const heap = new MinHeap(), g = new Map([[key(...start), 0]]), prev = new Map(), done = new Set(), order = [];
+  heap.push([h(...start), ...start]);
+  while (heap.size) {
+    const [, x, y] = heap.pop(), k = key(x, y);
+    if (done.has(k)) continue;          // lazy deletion of stale heap entries
+    done.add(k); order.push([x, y]);
+    if (x === goal[0] && y === goal[1]) return finish(order, prev);
+    for (const [nx, ny] of nbrs(x, y)) {
+      const ng = g.get(k) + cost[ny][nx], nk = key(nx, ny);
+      if (ng < (g.get(nk) ?? Infinity)) { g.set(nk, ng); prev.set(nk, [x, y]); heap.push([ng + h(nx, ny), nx, ny]); }
+    }
+  }
+  return { order, path: [], total: 0 };
+}
+
+function draw() {
+  ctx.fillStyle = css('--bg'); ctx.fillRect(0, 0, cv.width, cv.height);
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    const c = cost[y][x];
+    ctx.fillStyle = c === 0 ? css('--wall') : c > 1 ? css('--weight') : seen.has(key(x, y)) ? css('--seen') : css('--bg');
+    ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+    if (c > 1 && seen.has(key(x, y))) { ctx.fillStyle = css('--seen'); ctx.fillRect(x * CELL + 5, y * CELL + 5, CELL - 10, CELL - 10); }
+    ctx.strokeStyle = css('--grid'); ctx.strokeRect(x * CELL, y * CELL, CELL, CELL);
+  }
+  ctx.fillStyle = css('--path');
+  for (const [x, y] of path) ctx.fillRect(x * CELL + 4, y * CELL + 4, CELL - 8, CELL - 8);
+  ctx.fillStyle = css('--start'); ctx.fillRect(start[0] * CELL + 2, start[1] * CELL + 2, CELL - 4, CELL - 4);
+  ctx.fillStyle = css('--end'); ctx.fillRect(goal[0] * CELL + 2, goal[1] * CELL + 2, CELL - 4, CELL - 4);
+}
+
+const stats = document.getElementById('stats');
+function resetRun() { clearInterval(timer); seen = new Set(); path = []; stats.textContent = ''; draw(); }
+
+function run() {
+  resetRun();
+  const algo = document.getElementById('algo').value;
+  const res = algo === 'bfs' ? bfs() : bestFirst(algo === 'astar');
+  let i = 0;
+  timer = setInterval(() => {
+    for (let n = 0; n < 6 && i < res.order.length; n++, i++) seen.add(key(...res.order[i]));
+    if (i >= res.order.length) {
+      clearInterval(timer); path = res.path;
+      stats.textContent = res.path.length
+        ? `Explored ${res.order.length} cells · path length ${res.path.length - 1} · path cost ${res.total}`
+        : `No path. Explored ${res.order.length} cells.`;
+    }
+    draw();
+  }, 12);
+}
+
+let painting = false, paintVal = 0;
+function cellAt(e) {
+  const r = cv.getBoundingClientRect(), s = cv.width / r.width;
+  return [Math.floor((e.clientX - r.left) * s / CELL), Math.floor((e.clientY - r.top) * s / CELL)];
+}
+function paintAt(e) {
+  const [x, y] = cellAt(e);
+  if (x < 0 || y < 0 || x >= COLS || y >= ROWS) return;
+  if ((x === start[0] && y === start[1]) || (x === goal[0] && y === goal[1])) return;
+  cost[y][x] = paintVal; resetRun();
+}
+cv.addEventListener('pointerdown', e => {
+  const [x, y] = cellAt(e);
+  if (e.shiftKey) { start = [x, y]; cost[y][x] = 1; resetRun(); return; }
+  if (e.altKey) { goal = [x, y]; cost[y][x] = 1; resetRun(); return; }
+  const chosen = +document.getElementById('paint').value;
+  paintVal = cost[y][x] === chosen ? 1 : chosen;   // click a painted cell again to erase
+  painting = true; paintAt(e);
+});
+cv.addEventListener('pointermove', e => { if (painting) paintAt(e); });
+addEventListener('pointerup', () => painting = false);
+document.getElementById('run').onclick = run;
+document.getElementById('reset').onclick = resetRun;
+document.getElementById('clear').onclick = () => { cost = cost.map(r => r.map(() => 1)); resetRun(); };
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+draw();
+</script>
+</body>
+</html>

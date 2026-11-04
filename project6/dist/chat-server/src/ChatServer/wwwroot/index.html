@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--muted:#6b7280;--line:#d4d4d8}
+@media (prefers-color-scheme:dark){:root{--bg:#16181d;--fg:#e8e8e8;--muted:#9ca3af;--line:#3a3d45}}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif;display:flex;flex-direction:column;height:100vh}
+header,form{padding:.5rem 1rem;display:flex;gap:.5rem;align-items:center}
+header{border-bottom:1px solid var(--line)}
+form{border-top:1px solid var(--line)}
+#status{margin-left:auto;color:var(--muted)}
+#users{color:var(--muted);padding:.25rem 1rem}
+#log{flex:1;overflow:auto;padding:1rem}
+.msg small{color:var(--muted)}
+input,button{font:inherit;padding:.4rem}
+#text{flex:1}
+</style>
+</head>
+<body>
+<header>
+  <strong id="who"></strong>
+  <form id="joinForm" style="padding:0;border:0"><input id="roomInput" placeholder="room name" aria-label="Room name"><button>Join</button></form>
+  <select id="roomSelect" aria-label="Active room"></select>
+  <span id="status" role="status">Connecting…</span>
+  <button id="retry" hidden>Reconnect</button>
+</header>
+<div id="users"></div>
+<div id="log" aria-live="polite"></div>
+<form id="sendForm"><input id="text" autocomplete="off" placeholder="Message" aria-label="Message"><button>Send</button></form>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js"></script>
+<script>
+const user = sessionStorage.getItem('user') || (() => {
+  const u = prompt('Your name?') || 'guest-' + Math.random().toString(36).slice(2, 6);
+  sessionStorage.setItem('user', u); return u;
+})();
+const $ = id => document.getElementById(id);
+$('who').textContent = user;
+
+const rooms = {};          // name -> { lastSeq, messages: [], users: [] }
+let active = null;
+
+const conn = new signalR.HubConnectionBuilder()
+  .withUrl('/chat?user=' + encodeURIComponent(user))
+  .withAutomaticReconnect([0, 1000, 2000, 5000, 10000])   // then gives up; the Reconnect button restarts it
+  .build();
+
+const status = t => $('status').textContent = t;
+
+function line(m) {
+  const d = document.createElement('div'); d.className = 'msg';
+  const s = document.createElement('small'); s.textContent = new Date(m.at).toLocaleTimeString() + ' ';
+  const b = document.createElement('strong'); b.textContent = m.user + ': ';
+  d.append(s, b, document.createTextNode(m.text));      // textContent/text nodes: no HTML injection
+  return d;
+}
+function render() {
+  const log = $('log'); log.replaceChildren();
+  if (!active) return;
+  rooms[active].messages.forEach(m => log.append(line(m)));
+  log.scrollTop = log.scrollHeight;
+  $('users').textContent = 'In room: ' + rooms[active].users.join(', ');
+}
+function addMessage(m) {
+  const r = rooms[m.room];
+  if (!r || m.seq <= r.lastSeq) return;                  // duplicate (e.g. arrived live and in the replay)
+  r.lastSeq = m.seq; r.messages.push(m);
+  if (m.room === active) { $('log').append(line(m)); $('log').scrollTop = $('log').scrollHeight; }
+}
+function setActive(name) {
+  active = name; $('roomSelect').value = name; render();
+}
+async function join(name, activate = true) {
+  rooms[name] ??= { lastSeq: 0, messages: [], users: [] };
+  if (![...$('roomSelect').options].some(o => o.value === name)) $('roomSelect').add(new Option(name, name));
+  const missed = await conn.invoke('JoinRoom', name, rooms[name].lastSeq);   // server replays only what we haven't seen
+  missed.forEach(addMessage);
+  if (activate) setActive(name); else if (name === active) render();
+}
+
+conn.on('Message', addMessage);
+conn.on('Presence', (room, users) => { if (rooms[room]) { rooms[room].users = users; if (room === active) $('users').textContent = 'In room: ' + users.join(', '); } });
+conn.onreconnecting(() => status('Reconnecting…'));
+conn.onreconnected(async () => {                         // new connection id: server-side group membership is gone, so rejoin
+  for (const name of Object.keys(rooms)) await join(name, false);
+  status('Connected (caught up)');
+});
+conn.onclose(() => { status('Offline'); $('retry').hidden = false; });
+
+async function start() {
+  try {
+    await conn.start(); status('Connected'); $('retry').hidden = true;
+    if (Object.keys(rooms).length) for (const n of Object.keys(rooms)) await join(n, false); else await join('general');
+  } catch { status('Offline'); $('retry').hidden = false; }
+}
+$('retry').onclick = start;
+$('roomSelect').onchange = e => setActive(e.target.value);
+$('joinForm').onsubmit = async e => {
+  e.preventDefault();
+  const n = $('roomInput').value.trim().toLowerCase(); $('roomInput').value = '';
+  if (n) try { await join(n); } catch (err) { alert(err.message.replace(/^.*HubException: /, '')); }
+};
+$('sendForm').onsubmit = async e => {
+  e.preventDefault();
+  const t = $('text').value.trim();
+  if (!t || !active || conn.state !== signalR.HubConnectionState.Connected) return;
+  $('text').value = '';
+  try { await conn.invoke('SendMessage', active, t); } catch (err) { alert(err.message.replace(/^.*HubException: /, '')); }
+};
+start();
+</script>
+</body>
+</html>
